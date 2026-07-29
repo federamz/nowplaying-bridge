@@ -1,10 +1,16 @@
+name: Build NowPlayingBridge.exe
+
+# Builds the Windows executable on GitHub's own Windows machines, so you don't
+# need Python installed anywhere. Run it from the Actions tab, or let it run
+# automatically when you publish a release.
+
 on:
-  workflow_dispatch:
+  workflow_dispatch:        # the "Run workflow" button
   release:
-    types: [published]
+    types: [published]      # also build automatically on a new release
 
 permissions:
-  contents: write
+  contents: write           # needed to attach the exe to a release
 
 jobs:
   build:
@@ -16,11 +22,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      # Works whether the source sits at the repo root or inside bridge/.
       - name: Locate source
         id: loc
         shell: pwsh
         run: |
-          if (Test-Path nowplaying_bridge.py)        { $dir = "." }
+          if (Test-Path nowplaying_bridge.py)            { $dir = "." }
           elseif (Test-Path bridge/nowplaying_bridge.py) { $dir = "bridge" }
           else {
             Write-Host "Repository contents:"
@@ -39,18 +46,22 @@ jobs:
       - name: Build the exe
         working-directory: ${{ steps.loc.outputs.dir }}
         run: >
-          python -m PyInstaller --onefile --console
+          python -m PyInstaller --onefile --windowed
           --name NowPlayingBridge
           --collect-all winsdk
           --collect-all winotify
+          --hidden-import status_window
+          --add-data "status_window.py;."
           nowplaying_bridge.py
 
+      # Confirms the exe starts and serves. A build machine has no music playing,
+      # so an empty session list is expected here and not a failure.
       - name: Smoke test
         working-directory: ${{ steps.loc.outputs.dir }}
         shell: pwsh
         continue-on-error: true
         run: |
-          Start-Process -FilePath dist\NowPlayingBridge.exe -PassThru | Out-Null
+          Start-Process -FilePath dist\NowPlayingBridge.exe -ArgumentList "--console" -PassThru | Out-Null
           Start-Sleep -Seconds 8
           try {
             $r = Invoke-RestMethod -Uri http://127.0.0.1:5788/health -TimeoutSec 10
