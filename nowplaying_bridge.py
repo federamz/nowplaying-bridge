@@ -33,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 APP_NAME = "NowPlaying Bridge"
-VERSION = "1.0.0"
+VERSION = "1.3.0"
 DEFAULT_PORT = 5788
 POLL_SECONDS = 0.25
 QUIET = False
@@ -61,13 +61,20 @@ def get_state():
 
 
 def safe_print(*parts):
-    """Windows consoles are not always UTF-8, and track names are not always ASCII."""
+    """
+    Windows consoles are not always UTF-8, and track names are not always ASCII.
+    In windowed builds there is no stdout at all, so this must never raise.
+    """
+    if not getattr(sys, "stdout", None):
+        return
     text = " ".join(str(p) for p in parts)
     try:
         print(text, flush=True)
     except UnicodeEncodeError:
         enc = sys.stdout.encoding or "ascii"
         print(text.encode(enc, "replace").decode(enc, "replace"), flush=True)
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -134,6 +141,19 @@ def ms(timespan):
         return 0
 
 
+def epoch_ms(dt):
+    """winsdk maps Windows DateTime to an aware datetime.datetime."""
+    if dt is None:
+        return 0
+    try:
+        value = int(dt.timestamp() * 1000)
+    except (AttributeError, OSError, OverflowError, ValueError):
+        return 0
+    # Windows reports 1601-01-01 (or 1970) when a player has never pushed a
+    # timeline at all. Treat anything implausible as "no timeline".
+    return value if value > 0 else 0
+
+
 async def read_thumbnail(ref):
     """
     SMTC hands artwork over as a stream reference, not bytes. Different winsdk
@@ -170,7 +190,24 @@ async def describe(session):
     status_value = int(info.playback_status) if info.playback_status is not None else 0
     start = ms(timeline.start_time)
     duration = max(0, ms(timeline.end_time) - start)
-    position = max(0, ms(timeline.position) - start)
+    snapshot = max(0, ms(timeline.position) - start)
+    updated_at = epoch_ms(timeline.last_updated_time)
+
+    # Position is a SNAPSHOT, not a running clock: players only push it when
+    # something changes, so polling it straight looks frozen (or snaps back to an
+    # old value). LastUpdatedTime says when the snapshot was taken, so the real
+    # position while playing is snapshot + time elapsed since then.
+    now_ms = int(time.time() * 1000)
+    timeline_ok = duration > 0 and updated_at > 0
+    position = snapshot
+    if timeline_ok and status_value == 4:
+        rate = 1.0
+        try:
+            if info.playback_rate:
+                rate = float(info.playback_rate) or 1.0
+        except (TypeError, ValueError):
+            rate = 1.0
+        position = snapshot + int(max(0, now_ms - updated_at) * rate)
     if duration and position > duration:
         position = duration
 
@@ -209,20 +246,34 @@ async def describe(session):
         "genres": genres,
         "duration_ms": duration,
         "position_ms": position,
-        "position_at": int(time.time() * 1000),
+        "position_at": now_ms,
+        "position_snapshot_ms": snapshot,
+        "position_updated_at": updated_at,
+        "timeline_ok": timeline_ok,
         "thumbnail": thumbnail,
     }
 
 
 def pick_current(sessions, current_source):
-    """The session a widget should show when no app filter is set."""
+    """
+    The session a widget should show when no app filter is set.
+
+    A session that is actually playing wins over whatever Windows calls the
+    "current" one: pause a YouTube tab and start Apple Music, and Windows often
+    keeps pointing at the browser, which would freeze the overlay on the old
+    track. Preferring the playing session is what a viewer expects.
+    """
+    playing = [s for s in sessions if s["is_playing"] and s["title"]]
+    if playing:
+        # More than one thing playing at once: honour the system's pick among them.
+        for s in playing:
+            if s["source"] == current_source:
+                return s
+        return playing[0]
     if current_source:
         for s in sessions:
             if s["source"] == current_source:
                 return s
-    for s in sessions:
-        if s["is_playing"]:
-            return s
     return sessions[0] if sessions else None
 
 
@@ -231,6 +282,33 @@ def is_showable(session):
     if not session or not session["title"]:
         return False
     return session["status"] not in ("closed", "opened", "stopped", "unknown")
+
+
+def live_session(session):
+    """
+    Re-extrapolate position at serve time.
+
+    The poller only refreshes every POLL_SECONDS, so its position can be a
+    fraction of a second stale by the time a request arrives. Recomputing from
+    position_updated_at here means every response is current.
+    """
+    if not session:
+        return None
+    out = dict(session)
+    now_ms = int(time.time() * 1000)
+    out["position_at"] = now_ms
+    if out.get("timeline_ok") and out.get("is_playing"):
+        pos = out["position_snapshot_ms"] + max(0, now_ms - out["position_updated_at"])
+        dur = out.get("duration_ms") or 0
+        out["position_ms"] = min(pos, dur) if dur else pos
+    return out
+
+
+# Windows drops the session entirely for a beat when a player skips tracks or
+# swaps queues. Holding the last good session through that gap keeps overlays
+# from blinking out on every skip.
+GRACE_MS = 4000
+_last_good = None
 
 
 async def poll_forever():
@@ -263,6 +341,18 @@ async def poll_forever():
                 pass
 
             current = pick_current(described, current_source)
+
+            global _last_good
+            now_wall = time.time()
+            if is_showable(current):
+                _last_good = {"session": current, "at": now_wall}
+            elif _last_good and (now_wall - _last_good["at"]) * 1000 < GRACE_MS:
+                current = _last_good["session"]
+                # Keep the held session findable by ?app= filters too, or a
+                # pinned widget would still see the skip-gap.
+                if current["source"] not in {s["source"] for s in described}:
+                    described = described + [current]
+
             set_state(
                 sessions=described,
                 current=current,
@@ -342,17 +432,19 @@ class Handler(BaseHTTPRequestHandler):
             wanted = (query.get("app") or [""])[0].strip().lower()
             session = state["current"]
             if wanted:
-                session = None
-                for s in state["sessions"]:
-                    haystack = f"{s['source']} {s['source_name']}".lower()
-                    if wanted in haystack:
-                        session = s
-                        break
+                matches = [
+                    s for s in state["sessions"]
+                    if wanted in f"{s['source']} {s['source_name']}".lower()
+                ]
+                # Same rule as pick_current: a playing match beats a paused one.
+                session = next((s for s in matches if s["is_playing"]), None) or (
+                    matches[0] if matches else None
+                )
             self._send({
                 "bridge": APP_NAME,
                 "version": VERSION,
                 "updated_at": state["updated_at"],
-                "session": session if is_showable(session) else None,
+                "session": live_session(session) if is_showable(session) else None,
             })
             return
 
@@ -391,6 +483,7 @@ def main():
     parser = argparse.ArgumentParser(description=f"{APP_NAME} {VERSION}")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"default {DEFAULT_PORT}")
     parser.add_argument("--host", default="127.0.0.1", help="default 127.0.0.1 (this PC only)")
+    parser.add_argument("--console", action="store_true", help="no window, log to the console")
     parser.add_argument("--quiet", action="store_true", help="don't print track changes")
     args = parser.parse_args()
 
@@ -408,29 +501,72 @@ def main():
     poller.start()
 
     url = f"http://{args.host}:{args.port}/now-playing"
-    safe_print("")
-    safe_print(f"  {APP_NAME} {VERSION}")
-    safe_print(f"  {url}")
-    safe_print("")
-    safe_print("  Leave this window open while you stream. Close it to stop.")
-    safe_print("")
-    notify("Running", "Leave the window open while you stream.")
 
     try:
         server = ThreadingHTTPServer((args.host, args.port), Handler)
     except OSError as exc:
-        safe_print(f"  Could not start on port {args.port}: {exc}")
-        safe_print(f"  Something else may be using it. Try:  NowPlayingBridge.exe --port 5789")
-        input("\n  Press Enter to close.")
+        msg = (
+            f"Could not start on port {args.port}.\n\n{exc}\n\n"
+            f"Something else may be using it. Try:\n"
+            f"NowPlayingBridge.exe --port 5789"
+        )
+        if args.console:
+            safe_print("  " + msg.replace("\n", "\n  "))
+            input("\n  Press Enter to close.")
+        else:
+            show_error(f"{APP_NAME} — could not start", msg)
         return 1
 
+    serve = threading.Thread(target=server.serve_forever, name="http", daemon=True)
+    serve.start()
+    notify("Running", "Leave the window open while you stream.")
+
+    if args.console:
+        safe_print("")
+        safe_print(f"  {APP_NAME} {VERSION}")
+        safe_print(f"  {url}")
+        safe_print("")
+        safe_print("  Leave this window open while you stream. Close it to stop.")
+        safe_print("")
+        try:
+            serve.join()
+        except KeyboardInterrupt:
+            safe_print("\n  Stopped.")
+        finally:
+            server.server_close()
+        return 0
+
+    # Windowed mode is the default: a console is fine for developers but reads as
+    # something gone wrong to everyone else.
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        safe_print("\n  Stopped.")
+        from status_window import StatusWindow
+
+        StatusWindow(APP_NAME, VERSION, url, get_state, server.shutdown).run()
+    except Exception as exc:
+        # Never strand the user with no UI and no explanation — fall back to console.
+        safe_print(f"  Could not open the window ({exc}). Running in console mode.")
+        safe_print(f"  {url}")
+        try:
+            serve.join()
+        except KeyboardInterrupt:
+            pass
     finally:
         server.server_close()
     return 0
+
+
+def show_error(title, message):
+    """A message box, so a startup failure isn't invisible in windowed mode."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(title, message)
+        root.destroy()
+    except Exception:
+        safe_print(f"{title}: {message}")
 
 
 if __name__ == "__main__":

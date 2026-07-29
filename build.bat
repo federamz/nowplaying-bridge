@@ -26,10 +26,12 @@ if errorlevel 1 (
 
 echo.
 echo Building the exe...
-python -m PyInstaller --onefile --console ^
+python -m PyInstaller --onefile --windowed ^
   --name NowPlayingBridge ^
   --collect-all winsdk ^
   --collect-all winotify ^
+  --hidden-import status_window ^
+  --add-data "status_window.py;." ^
   nowplaying_bridge.py
 if errorlevel 1 (
   echo.
