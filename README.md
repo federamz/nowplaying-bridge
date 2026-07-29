@@ -104,10 +104,3 @@ anyway"). Building it yourself from source avoids that.
 
 GPL-3.0. See [LICENSE](LICENSE).
 
-## Credits
-
-Written by Federico Ramirez Honack for
-[Now Playing OS](https://github.com/YOUR-USERNAME). Independent implementation,
-but the idea of putting SMTC behind a local API came from nutty's
-[smtc-bridge](https://github.com/nuttylmao/smtc-bridge) — worth a look, and worth
-a thank you.
