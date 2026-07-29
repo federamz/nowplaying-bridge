@@ -1,0 +1,2 @@
+winsdk>=1.0.0
+winotify>=1.1.0

@@ -1,0 +1,45 @@
+@echo off
+REM Builds NowPlayingBridge.exe into the dist\ folder.
+REM Run this on Windows, in this folder, with Python 3.10+ installed.
+
+echo.
+echo === NowPlaying Bridge - build ===
+echo.
+
+python --version >nul 2>&1
+if errorlevel 1 (
+  echo Python was not found. Install it from python.org and tick
+  echo "Add python.exe to PATH" during setup, then run this again.
+  pause
+  exit /b 1
+)
+
+echo Installing dependencies...
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt pyinstaller
+if errorlevel 1 (
+  echo.
+  echo Dependency install failed. Scroll up for the reason.
+  pause
+  exit /b 1
+)
+
+echo.
+echo Building the exe...
+python -m PyInstaller --onefile --console ^
+  --name NowPlayingBridge ^
+  --collect-all winsdk ^
+  --collect-all winotify ^
+  nowplaying_bridge.py
+if errorlevel 1 (
+  echo.
+  echo Build failed. Scroll up for the reason.
+  pause
+  exit /b 1
+)
+
+echo.
+echo Done. Your app is at:  dist\NowPlayingBridge.exe
+echo Double-click it to test, then upload that one file to a GitHub release.
+echo.
+pause
