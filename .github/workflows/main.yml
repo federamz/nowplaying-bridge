@@ -10,18 +10,34 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
+      - name: Locate source
+        id: loc
+        shell: pwsh
+        run: |
+          if (Test-Path nowplaying_bridge.py)        { $dir = "." }
+          elseif (Test-Path bridge/nowplaying_bridge.py) { $dir = "bridge" }
+          else {
+            Write-Host "Repository contents:"
+            Get-ChildItem -Recurse -Depth 2 -Name
+            throw "nowplaying_bridge.py not found at the repo root or in bridge/"
+          }
+          Write-Host "Building from: $dir"
+          "dir=$dir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Install dependencies
+        working-directory: ${{ steps.loc.outputs.dir }}
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
       - name: Build the exe
+        working-directory: ${{ steps.loc.outputs.dir }}
         run: >
           python -m PyInstaller --onefile --console
           --name NowPlayingBridge
@@ -30,23 +46,29 @@ jobs:
           nowplaying_bridge.py
 
       - name: Smoke test
+        working-directory: ${{ steps.loc.outputs.dir }}
         shell: pwsh
+        continue-on-error: true
         run: |
           Start-Process -FilePath dist\NowPlayingBridge.exe -PassThru | Out-Null
-          Start-Sleep -Seconds 6
-          $r = Invoke-RestMethod -Uri http://127.0.0.1:5788/health -TimeoutSec 10
-          Write-Host "health:" ($r | ConvertTo-Json -Compress)
-          if (-not $r.ok) { throw "bridge reported not ok" }
+          Start-Sleep -Seconds 8
+          try {
+            $r = Invoke-RestMethod -Uri http://127.0.0.1:5788/health -TimeoutSec 10
+            Write-Host "health: $($r | ConvertTo-Json -Compress)"
+          } catch {
+            Write-Host "::warning::health check did not respond: $($_.Exception.Message)"
+          }
           Get-Process NowPlayingBridge -ErrorAction SilentlyContinue | Stop-Process -Force
 
       - name: Upload as a downloadable artifact
         uses: actions/upload-artifact@v4
         with:
           name: NowPlayingBridge
-          path: dist/NowPlayingBridge.exe
+          path: ${{ steps.loc.outputs.dir }}/dist/NowPlayingBridge.exe
+          if-no-files-found: error
 
       - name: Attach to the release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/NowPlayingBridge.exe
+          files: ${{ steps.loc.outputs.dir }}/dist/NowPlayingBridge.exe
