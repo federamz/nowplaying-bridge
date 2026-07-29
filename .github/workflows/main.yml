@@ -1,0 +1,52 @@
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build the exe
+        run: >
+          python -m PyInstaller --onefile --console
+          --name NowPlayingBridge
+          --collect-all winsdk
+          --collect-all winotify
+          nowplaying_bridge.py
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          Start-Process -FilePath dist\NowPlayingBridge.exe -PassThru | Out-Null
+          Start-Sleep -Seconds 6
+          $r = Invoke-RestMethod -Uri http://127.0.0.1:5788/health -TimeoutSec 10
+          Write-Host "health:" ($r | ConvertTo-Json -Compress)
+          if (-not $r.ok) { throw "bridge reported not ok" }
+          Get-Process NowPlayingBridge -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      - name: Upload as a downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NowPlayingBridge
+          path: dist/NowPlayingBridge.exe
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NowPlayingBridge.exe
