@@ -3,12 +3,12 @@
 Exposes what Windows is playing as a small local JSON API, so a browser-based
 stream overlay can show it.
 
-Windows already tracks the current track — it is what puts the song name on your
+Windows already tracks the current track, it is what puts the song name on your
 keyboard's media keys. That system is called **SMTC** (System Media Transport
 Controls), and nearly every player reports to it: Apple Music, Spotify, TIDAL,
 Qobuz, Deezer, browsers, foobar2000, MusicBee, VLC, local files.
 
-Run this, and your overlay can read all of them through one endpoint — no
+Run this, and your overlay can read all of them through one endpoint. no
 per-service API keys, no scrobbling account, no waiting for a third party to
 refresh. Real playback position, instant pause, artwork included.
 
