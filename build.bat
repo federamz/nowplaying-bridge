@@ -24,9 +24,15 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM Rebuild the .ico from the PNG master. Pillow's container is known-good; a
+REM hand-written one can be odd enough that PyInstaller silently falls back to
+REM the default Python icon.
+echo Preparing the icon...
+python -c "from PIL import Image; im=Image.open('nowplaying-bridge.png').convert('RGBA'); im.save('nowplaying-bridge.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)]); print('icon ready')"
+
 echo.
 echo Building the exe...
-python -m PyInstaller --onefile --windowed ^
+python -m PyInstaller --onefile --windowed --clean --noconfirm ^
   --name NowPlayingBridge ^
   --icon nowplaying-bridge.ico ^
   --version-file version_info.txt ^
