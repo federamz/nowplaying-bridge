@@ -1,0 +1,39 @@
+# PyInstaller version resource.
+#
+# An exe with no icon and no version metadata is the most suspicious-looking
+# thing Windows can be handed. Filling this in does not remove the
+# unverified-publisher prompt (only code signing does), but it means the file's
+# Properties -> Details tab names a real product and author instead of nothing.
+#
+# Keep filevers/prodvers in step with VERSION in nowplaying_bridge.py.
+
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 6, 0, 0),
+    prodvers=(1, 6, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [
+          StringStruct('CompanyName', 'Federico Ramirez Honack'),
+          StringStruct('FileDescription', 'NowPlaying Bridge - reads Windows now-playing info for stream overlays'),
+          StringStruct('FileVersion', '1.6.0'),
+          StringStruct('InternalName', 'NowPlayingBridge'),
+          StringStruct('LegalCopyright', 'Copyright (c) Federico Ramirez Honack. MIT licensed.'),
+          StringStruct('OriginalFilename', 'NowPlayingBridge.exe'),
+          StringStruct('ProductName', 'NowPlaying Bridge'),
+          StringStruct('ProductVersion', '1.6.0'),
+        ]
+      )
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)

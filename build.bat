@@ -16,7 +16,7 @@ if errorlevel 1 (
 
 echo Installing dependencies...
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt pyinstaller
+python -m pip install -r requirements.txt pyinstaller pillow
 if errorlevel 1 (
   echo.
   echo Dependency install failed. Scroll up for the reason.
@@ -29,6 +29,7 @@ echo Building the exe...
 python -m PyInstaller --onefile --windowed ^
   --name NowPlayingBridge ^
   --icon nowplaying-bridge.ico ^
+  --version-file version_info.txt ^
   --collect-all winsdk ^
   --collect-all winotify ^
   --hidden-import status_window ^

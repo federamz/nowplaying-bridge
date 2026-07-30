@@ -112,7 +112,7 @@ is never extrapolated. `playback_rate` is honoured when a player reports one.
 Needs Windows and Python 3.10+.
 
 ```
-git clone https://github.com/YOUR-USERNAME/nowplaying-bridge
+git clone https://github.com/federamz/nowplaying-bridge
 cd nowplaying-bridge
 build.bat
 ```
@@ -170,7 +170,7 @@ GPL-3.0. See [LICENSE](LICENSE).
 ## Credits
 
 Written by Federico Ramirez Honack for
-[Now Playing OS](https://github.com/YOUR-USERNAME). Independent implementation,
+[Now Playing OS](https://github.com/federamz). Independent implementation,
 but the idea of putting SMTC behind a local API came from nutty's
 [smtc-bridge](https://github.com/nuttylmao/smtc-bridge) — worth a look, and worth
 a thank you.
