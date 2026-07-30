@@ -1,0 +1,22 @@
+{
+  "_readme": [
+    "Update notices for the Now Playing OS widgets.",
+    "",
+    "Each widget's config app fetches this file on load and compares the version",
+    "here against its own. If this one is higher it shows a small notice telling",
+    "the owner to re-download from their Etsy purchases page.",
+    "",
+    "To announce an update: bump the version, write one short line of notes, and",
+    "commit. That is the whole release process for the widget itself - no server,",
+    "no mailing list, nothing to maintain.",
+    "",
+    "Keep notes under about ten words; it renders on one line.",
+    "The version must match the WIDGET_VERSION constant in the widget's HTML."
+  ],
+
+  "nowplaying-os": {
+    "version": "1.7.0",
+    "notes": "bridge support, artwork lookup, width control",
+    "url": "https://github.com/federamz/nowplaying-bridge/releases/latest"
+  }
+}
