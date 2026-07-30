@@ -41,17 +41,34 @@ jobs:
         working-directory: ${{ steps.loc.outputs.dir }}
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller
+          python -m pip install -r requirements.txt pyinstaller pillow
+
+      # Rebuild the .ico from the PNG master with Pillow, capped at 128px.
+      #
+      # This is the actual cause of the missing icon: PyInstaller's resource
+      # writer cannot read PNG-compressed ICO entries. Windows accepts them, so
+      # the file looks fine everywhere except inside the exe, and the icon is
+      # dropped with no error. Pillow stores sizes below 256 as uncompressed DIB,
+      # so leaving 256 out keeps every entry in a format PyInstaller can embed.
+      - name: Prepare the icon
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: >
+          python -c "from PIL import Image; im=Image.open('nowplaying-bridge.png').convert('RGBA');
+          im.save('nowplaying-bridge.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128)]);
+          print('icon ready')"
 
       - name: Build the exe
         working-directory: ${{ steps.loc.outputs.dir }}
         run: >
-          python -m PyInstaller --onefile --windowed
+          python -m PyInstaller --onefile --windowed --clean --noconfirm
           --name NowPlayingBridge
+          --icon nowplaying-bridge.ico
+          --version-file version_info.txt
           --collect-all winsdk
           --collect-all winotify
           --hidden-import status_window
           --add-data "status_window.py;."
+          --add-data "nowplaying-bridge.ico;."
           nowplaying_bridge.py
 
       # Confirms the exe starts and serves. A build machine has no music playing,
@@ -70,6 +87,34 @@ jobs:
             Write-Host "::warning::health check did not respond: $($_.Exception.Message)"
           }
           Get-Process NowPlayingBridge -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      - name: Confirm the icon and metadata were embedded
+        working-directory: ${{ steps.loc.outputs.dir }}
+        shell: pwsh
+        run: |
+          # Extract the icon Windows will actually show and look for the brand
+          # amber (#ffd479) in it. PyInstaller can drop an icon without failing,
+          # so the only trustworthy check is on the finished exe.
+          Add-Type -AssemblyName System.Drawing
+          $exe = (Resolve-Path dist\NowPlayingBridge.exe).Path
+          $ico = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
+          $bmp = $ico.ToBitmap()
+          $hit = $false
+          for ($x = 0; $x -lt $bmp.Width -and -not $hit; $x++) {
+            for ($y = 0; $y -lt $bmp.Height; $y++) {
+              $p = $bmp.GetPixel($x, $y)
+              if ($p.A -gt 128 -and $p.R -gt 200 -and $p.G -gt 170 -and $p.B -lt 160) { $hit = $true; break }
+              }
+          }
+          $bmp.Dispose(); $ico.Dispose()
+          if (-not $hit) {
+            throw "The exe is not carrying our icon - check that nowplaying-bridge.png uploaded and that the Prepare the icon step ran"
+          }
+          Write-Host "icon embedded: yes"
+          $v = (Get-Item dist\NowPlayingBridge.exe).VersionInfo
+          Write-Host "ProductName : $($v.ProductName)"
+          Write-Host "FileVersion : $($v.FileVersion)"
+          if (-not $v.ProductName) { throw "version resource was not embedded" }
 
       - name: Upload as a downloadable artifact
         uses: actions/upload-artifact@v4
