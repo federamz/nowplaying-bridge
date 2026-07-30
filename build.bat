@@ -24,11 +24,12 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM Rebuild the .ico from the PNG master. Pillow's container is known-good; a
-REM hand-written one can be odd enough that PyInstaller silently falls back to
-REM the default Python icon.
+REM Rebuild the .ico from the PNG master, capped at 128px. PyInstaller cannot
+REM read PNG-compressed ICO entries — Windows can, so the file looks fine
+REM everywhere except inside the exe. Pillow writes sizes under 256 as
+REM uncompressed DIB, which is what PyInstaller needs.
 echo Preparing the icon...
-python -c "from PIL import Image; im=Image.open('nowplaying-bridge.png').convert('RGBA'); im.save('nowplaying-bridge.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)]); print('icon ready')"
+python -c "from PIL import Image; im=Image.open('nowplaying-bridge.png').convert('RGBA'); im.save('nowplaying-bridge.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128)]); print('icon ready')"
 
 echo.
 echo Building the exe...
