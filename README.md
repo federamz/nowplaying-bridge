@@ -54,6 +54,11 @@ Every response sends `Access-Control-Allow-Origin: *`, so an overlay loaded from
     "album": "Tracy Chapman",
     "album_artist": "Tracy Chapman",
     "track_number": 1,
+    "album_track_count": 11,
+    "subtitle": "",
+    "playback_type": "music",
+    "is_shuffle_active": false,
+    "auto_repeat_mode": "none",
     "genres": [],
     "duration_ms": 296000,
     "position_ms": 63120,
@@ -72,6 +77,11 @@ the overlay's cue to hide. A pause keeps the session and sets `status` to
 
 `status` is one of `playing`, `paused`, `changing`, `stopped`, `opened`,
 `closed`.
+
+`playback_type` is `music`, `video`, `image` or `unknown` — filter on it to
+follow music and ignore a YouTube clip or a Twitch stream playing in the same
+browser. `auto_repeat_mode` is `none`, `track` or `list`. Fields a player does
+not report come back as `0`, `""` or `false` rather than being omitted.
 
 `thumbnail` is a ready-to-use data URL, or `null` when the player supplies no
 artwork.
@@ -121,12 +131,34 @@ projection ever published, and it is stable in practice despite the beta tag.
 
 ## Notes
 
+Settings live in `settings.ini`, written next to the exe on first run — host and
+port, with comments. Command-line flags (`--port`, `--host`) still override it.
+`--console` runs without the window.
+
+If something goes wrong the app writes a timestamped file into a `logs` folder
+beside the exe and keeps the newest ten. Starting a second copy is detected and
+says so instead of failing on the port.
+
+`/sessions` in a browser is a readable page listing every app id Windows can
+see — the string to paste into an overlay's app filter. Scripts still get JSON.
+
 Windows hands over whichever app most recently played audio, so a YouTube tab can
 take the spot from your music player. Use `?app=` to pin it.
 
 Windows also drops the session entirely for a beat when a player skips tracks.
 The bridge holds the last good session for 4 seconds through that gap, so
 overlays don't blink on every skip.
+
+Players push metadata out of order — Apple Music web reports a new title while
+its thumbnail is still the previous track's. The bridge keeps each track's
+artwork open to revision for 6 seconds and serves the corrected image when it
+arrives, so clients can swap art in place instead of caching the wrong cover.
+
+For the same reason `position_ms` should be anchored **monotonically** by
+clients: browser players re-stamp an old snapshot with a fresh
+`LastUpdatedTime`, so trusting every reading makes a progress bar jitter forward
+and back. Accept forward movement and jumps over ~2.5s (a real seek); ignore
+small backward steps.
 
 Unsigned executables get a SmartScreen warning on first run ("More info" → "Run
 anyway"). Building it yourself from source avoids that.

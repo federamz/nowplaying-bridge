@@ -35,6 +35,7 @@ class StatusWindow:
         self.root.minsize(420, 290)
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        self._set_window_icon()
 
         wrap = tk.Frame(self.root, bg=BG, padx=22, pady=20)
         wrap.pack(fill="both", expand=True)
@@ -114,6 +115,19 @@ class StatusWindow:
         ).pack(fill="x", pady=(18, 0))
 
         self.refresh()
+
+    def _set_window_icon(self):
+        """Use the app icon in the title bar and taskbar when it was bundled."""
+        import os
+        import sys
+
+        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(base, "nowplaying-bridge.ico")
+        if os.path.exists(path):
+            try:
+                self.root.iconbitmap(path)
+            except Exception:
+                pass  # a missing or odd icon must never stop the window opening
 
     def copy_url(self, _event=None):
         self.root.clipboard_clear()

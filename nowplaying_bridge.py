@@ -25,18 +25,137 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import argparse
 import asyncio
 import base64
+import configparser
 import json
+import os
+import socket
 import sys
 import threading
 import time
+import traceback
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 APP_NAME = "NowPlaying Bridge"
-VERSION = "1.3.0"
+VERSION = "1.6.0"
 DEFAULT_PORT = 5788
 POLL_SECONDS = 0.25
 QUIET = False
+
+
+# --------------------------------------------------------------------------
+# Living next to the exe: settings, crash logs, one-instance-only.
+#
+# None of this is about SMTC. It is about the app being supportable once it is
+# on someone else's PC, where there is no console to read and no way to ask them
+# to pass a command-line flag.
+# --------------------------------------------------------------------------
+def app_dir():
+    """The folder the exe sits in (not PyInstaller's temp unpack folder)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+SETTINGS_TEMPLATE = """; NowPlaying Bridge settings
+;
+; port  which port the bridge serves on. Change it only if another program
+;       already uses 5788 (the app will tell you if that happens).
+; host  127.0.0.1 means this PC only, which is what you want. Set 0.0.0.0
+;       only if you run OBS on a different machine on your network.
+
+[server]
+host = 127.0.0.1
+port = 5788
+"""
+
+
+def load_settings():
+    """
+    Read settings.ini from beside the exe, writing a commented default if absent.
+
+    A file a buyer can open in Notepad beats a command-line flag they will never
+    type. Command-line flags still win over the file when both are given.
+    """
+    path = os.path.join(app_dir(), "settings.ini")
+    parser = configparser.ConfigParser()
+    parser.read_string(SETTINGS_TEMPLATE)
+    if os.path.exists(path):
+        try:
+            parser.read(path, encoding="utf-8")
+        except Exception:
+            pass  # a mangled file should never stop the app starting
+    else:
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(SETTINGS_TEMPLATE)
+        except OSError:
+            pass  # read-only folder (Program Files); defaults still apply
+    host = parser.get("server", "host", fallback="127.0.0.1").strip() or "127.0.0.1"
+    try:
+        port = parser.getint("server", "port", fallback=DEFAULT_PORT)
+    except ValueError:
+        port = DEFAULT_PORT
+    if not 1 <= port <= 65535:
+        port = DEFAULT_PORT
+    return host, port
+
+
+def log_crash(exc):
+    """
+    Write a timestamped crash log beside the exe and keep the newest 10.
+
+    In a windowed build a traceback has nowhere to go, so a crash would be
+    invisible: the app simply vanishes. A file turns "it stopped working" into
+    something a buyer can send and I can read.
+    """
+    try:
+        folder = os.path.join(app_dir(), "logs")
+        os.makedirs(folder, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+        with open(os.path.join(folder, f"crash {stamp}.txt"), "w", encoding="utf-8") as handle:
+            handle.write(f"{APP_NAME} {VERSION}\n")
+            handle.write(f"Time: {stamp}\n")
+            handle.write(f"Python: {sys.version}\n\n")
+            handle.write(f"{exc}\n\n")
+            handle.write(traceback.format_exc())
+        logs = sorted(
+            (os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".txt")),
+            key=os.path.getmtime,
+        )
+        for stale in logs[:-10]:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    except Exception:
+        pass  # logging a crash must never cause one
+
+
+def already_running(host, port):
+    """
+    True when another copy of this bridge already holds the port.
+
+    Asking the port directly beats a PID lock file: no stale locks to clean up
+    after a crash, and it distinguishes our own bridge from some unrelated
+    program that happens to use the same port.
+    """
+    probe = "127.0.0.1" if host in ("0.0.0.0", "") else host
+    try:
+        with socket.create_connection((probe, port), timeout=0.6) as sock:
+            sock.sendall(
+                f"GET /health HTTP/1.0\r\nHost: {probe}\r\nConnection: close\r\n\r\n".encode()
+            )
+            reply = b""
+            while len(reply) < 4096:
+                chunk = sock.recv(1024)
+                if not chunk:
+                    break
+                reply += chunk
+    except OSError:
+        return False
+    return APP_NAME.encode() in reply
 
 # --------------------------------------------------------------------------
 # Shared state. The poller thread writes it, the HTTP threads read it.
@@ -46,8 +165,15 @@ _state_lock = threading.Lock()
 _state = {"sessions": [], "current": None, "updated_at": 0.0, "error": None}
 
 # Base64 artwork is expensive to build, so keep the last one per track.
+#
+# Cached entries stay open to revision for ART_SETTLE_MS. Players push metadata
+# out of order — Apple Music web reports the new title while its thumbnail is
+# still the previous track's — so the first read after a track change can be the
+# wrong image. Re-reading during the settle window catches the real artwork when
+# it lands, and clients swap it in place.
 _thumb_cache = {}
 _THUMB_CACHE_MAX = 8
+ART_SETTLE_MS = 6000
 
 
 def set_state(**kwargs):
@@ -130,6 +256,21 @@ STATUS_NAMES = {
     5: "paused",
 }
 
+# Windows classifies each session, which is how a widget can follow music and
+# ignore a YouTube clip or a Twitch stream in the same browser.
+PLAYBACK_TYPES = {
+    0: "unknown",
+    1: "music",
+    2: "video",
+    3: "image",
+}
+
+REPEAT_MODES = {
+    0: "none",
+    1: "track",
+    2: "list",
+}
+
 
 def ms(timespan):
     """winsdk maps Windows TimeSpan to datetime.timedelta."""
@@ -188,6 +329,19 @@ async def describe(session):
     artist = (props.artist or "").strip()
 
     status_value = int(info.playback_status) if info.playback_status is not None else 0
+
+    # Extra SMTC fields. Every one is optional per player, so each read is
+    # defended individually rather than in one try block that would drop them all.
+    def opt(read, cast, fallback):
+        try:
+            value = read()
+            return fallback if value is None else cast(value)
+        except Exception:
+            return fallback
+
+    type_value = opt(lambda: info.playback_type, int, 0)
+    repeat_value = opt(lambda: info.auto_repeat_mode, int, 0)
+    shuffle = opt(lambda: info.is_shuffle_active, bool, False)
     start = ms(timeline.start_time)
     duration = max(0, ms(timeline.end_time) - start)
     snapshot = max(0, ms(timeline.position) - start)
@@ -214,8 +368,10 @@ async def describe(session):
     thumbnail = None
     if props.thumbnail is not None:
         key = (source, title, artist)
-        if key in _thumb_cache:
-            thumbnail = _thumb_cache[key]
+        entry = _thumb_cache.get(key)
+        settled = entry is not None and (now_ms - entry["first"]) > ART_SETTLE_MS
+        if settled:
+            thumbnail = entry["data"]
         else:
             try:
                 raw = await read_thumbnail(props.thumbnail)
@@ -223,9 +379,16 @@ async def describe(session):
                     thumbnail = "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
             except Exception:
                 thumbnail = None
-            if len(_thumb_cache) >= _THUMB_CACHE_MAX:
-                _thumb_cache.clear()
-            _thumb_cache[key] = thumbnail
+            if entry is None:
+                if len(_thumb_cache) >= _THUMB_CACHE_MAX:
+                    _thumb_cache.clear()
+                _thumb_cache[key] = {"data": thumbnail, "first": now_ms}
+            elif thumbnail:
+                # Keep the original timestamp: the window is per track, not per read.
+                entry["data"] = thumbnail
+            else:
+                # A momentary read failure must not blank art we already have.
+                thumbnail = entry["data"]
 
     genres = []
     try:
@@ -238,11 +401,18 @@ async def describe(session):
         "source_name": friendly_name(source),
         "status": STATUS_NAMES.get(status_value, "unknown"),
         "is_playing": status_value == 4,
+        # A widget can use this to ignore video sessions (a YouTube clip or a
+        # Twitch stream) and follow music only.
+        "playback_type": PLAYBACK_TYPES.get(type_value, "unknown"),
+        "is_shuffle_active": shuffle,
+        "auto_repeat_mode": REPEAT_MODES.get(repeat_value, "none"),
         "title": title,
         "artist": artist,
         "album": (props.album_title or "").strip(),
         "album_artist": (props.album_artist or "").strip(),
         "track_number": int(props.track_number or 0),
+        "album_track_count": opt(lambda: props.album_track_count, int, 0),
+        "subtitle": opt(lambda: props.subtitle, lambda v: str(v).strip(), ""),
         "genres": genres,
         "duration_ms": duration,
         "position_ms": position,
@@ -400,6 +570,60 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # a polling widget would flood the console
 
+    def _send_sessions_page(self, state):
+        """A plain readable list of what Windows can see right now."""
+        def esc(text):
+            return (
+                str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            )
+
+        rows = []
+        for s in state["sessions"]:
+            playing = "playing" if s["is_playing"] else s["status"]
+            track = " — ".join(x for x in (s["artist"], s["title"]) if x) or "nothing loaded"
+            rows.append(
+                "<li><code>{sid}</code><div class=meta>{name} · {kind} · {state}</div>"
+                "<div class=track>{track}</div></li>".format(
+                    sid=esc(s["source"]),
+                    name=esc(s["source_name"]),
+                    kind=esc(s["playback_type"]),
+                    state=esc(playing),
+                    track=esc(track),
+                )
+            )
+        if not rows:
+            rows.append(
+                "<li class=empty>Nothing is reporting to Windows right now. "
+                "Press play in a music app and reload this page.</li>"
+            )
+        body = """<!doctype html><html><head><meta charset=utf-8>
+<title>{app} — active sessions</title><meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+body{{margin:0;background:#0e0e12;color:#f2f2f5;font:15px/1.5 "Segoe UI",system-ui,sans-serif;padding:32px}}
+h1{{font-size:19px;margin:0 0 4px}}
+p{{color:#8b8b97;margin:0 0 22px;font-size:13.5px;max-width:60ch}}
+ul{{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:10px;max-width:70ch}}
+li{{background:#16161c;border:1px solid #26262e;border-radius:12px;padding:14px 16px}}
+li.empty{{color:#8b8b97}}
+code{{font:13px/1.5 Consolas,monospace;color:#ffd479;word-break:break-all}}
+.meta{{color:#8b8b97;font-size:12px;margin-top:6px;text-transform:uppercase;letter-spacing:.06em}}
+.track{{margin-top:6px;font-size:14px}}
+footer{{color:#8b8b97;font-size:12.5px;margin-top:24px}}
+</style></head><body>
+<h1>Active sessions</h1>
+<p>Everything Windows can currently see. Copy the highlighted id into the
+widget's “only follow this app” field to pin the overlay to one player.</p>
+<ul>{rows}</ul>
+<footer>{app} {ver} · reload to refresh</footer>
+</body></html>""".format(app=APP_NAME, ver=VERSION, rows="".join(rows))
+        raw = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
     def _send(self, payload, status=200):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -449,6 +673,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/sessions":
+            # A streamer reading this page needs the app id with their eyes, to
+            # paste into the widget's "only follow this app" field. Browsers get
+            # a readable page; anything else (a script, curl) still gets JSON.
+            wants_html = "text/html" in (self.headers.get("Accept") or "")
+            if wants_html:
+                self._send_sessions_page(state)
+                return
             self._send({
                 "bridge": APP_NAME,
                 "version": VERSION,
@@ -457,6 +688,7 @@ class Handler(BaseHTTPRequestHandler):
                         "source": s["source"],
                         "source_name": s["source_name"],
                         "status": s["status"],
+                        "playback_type": s["playback_type"],
                         "title": s["title"],
                         "artist": s["artist"],
                     }
@@ -480,16 +712,33 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    ini_host, ini_port = load_settings()
     parser = argparse.ArgumentParser(description=f"{APP_NAME} {VERSION}")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"default {DEFAULT_PORT}")
-    parser.add_argument("--host", default="127.0.0.1", help="default 127.0.0.1 (this PC only)")
+    parser.add_argument("--port", type=int, default=None, help=f"overrides settings.ini (default {ini_port})")
+    parser.add_argument("--host", default=None, help=f"overrides settings.ini (default {ini_host})")
     parser.add_argument("--console", action="store_true", help="no window, log to the console")
     parser.add_argument("--quiet", action="store_true", help="don't print track changes")
     args = parser.parse_args()
+    args.host = args.host or ini_host
+    args.port = args.port or ini_port
 
     if sys.platform != "win32":
         safe_print(f"{APP_NAME} needs Windows — SMTC is a Windows API.")
         return 1
+
+    # Double-clicking the exe twice is common. Say so plainly instead of dying
+    # on a port-in-use error that reads like a fault.
+    if already_running(args.host, args.port):
+        msg = (
+            f"{APP_NAME} is already running.\n\n"
+            "Look for its window, or its icon in the taskbar. "
+            "You only need one copy open."
+        )
+        if args.console:
+            safe_print("  " + msg.replace("\n", "\n  "))
+        else:
+            show_error(APP_NAME, msg)
+        return 0
 
     if args.quiet:
         global QUIET
@@ -507,8 +756,8 @@ def main():
     except OSError as exc:
         msg = (
             f"Could not start on port {args.port}.\n\n{exc}\n\n"
-            f"Something else may be using it. Try:\n"
-            f"NowPlayingBridge.exe --port 5789"
+            f"Another program is using it. Open settings.ini next to this app "
+            f"and change the port to 5789, then start it again."
         )
         if args.console:
             safe_print("  " + msg.replace("\n", "\n  "))
@@ -570,4 +819,19 @@ def show_error(title, message):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A windowed build has no console, so an unhandled exception would make the
+    # app vanish with no trace. Log it where a buyer can find and send it.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - last resort before exit
+        log_crash(exc)
+        show_error(
+            f"{APP_NAME} stopped",
+            "Something went wrong and the bridge had to close.\n\n"
+            "A file was saved in the \"logs\" folder next to the app. "
+            "Send me the newest one and I'll fix it.\n\n"
+            f"{exc}",
+        )
+        sys.exit(1)

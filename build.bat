@@ -28,10 +28,12 @@ echo.
 echo Building the exe...
 python -m PyInstaller --onefile --windowed ^
   --name NowPlayingBridge ^
+  --icon nowplaying-bridge.ico ^
   --collect-all winsdk ^
   --collect-all winotify ^
   --hidden-import status_window ^
   --add-data "status_window.py;." ^
+  --add-data "nowplaying-bridge.ico;." ^
   nowplaying_bridge.py
 if errorlevel 1 (
   echo.
